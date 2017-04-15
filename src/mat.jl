@@ -1,9 +1,9 @@
-import Base: size, eltype, call, similar, convert, show, isempty
+import Base: size, eltype, similar, convert, show, isempty
 
 """AbstractCvMat{T,N} represents `N`-dimentional arrays in OpenCV (cv::Mat,
 cv::UMat, etc), which element type are bound to `T`.
 """
-abstract AbstractCvMat{T,N} <: AbstractArray{T,N}
+abstract type AbstractCvMat{T,N} <: AbstractArray{T,N} end
 
 # NOTE: subtypes of AbstractCvMat should have `handle` as a member.
 handle(m::AbstractCvMat) = m.handle
@@ -22,7 +22,7 @@ eltype(m::cvMatExpr) = jltype(depth(m))
 
 const cvMat = cxxt"cv::Mat"
 const cvUMat = cxxt"cv::UMat"
-typealias cvMatVariants Union{cvMat, cvUMat}
+const cvMatVariants = Union{cvMat, cvUMat}
 
 depth(m::cvMatVariants) = convert(Int, icxx"$m.depth();")
 channels(m::cvMatVariants) = convert(Int, icxx"$m.channels();")
@@ -188,7 +188,7 @@ end
 
 ### Mat-specific methods ###
 
-Base.linearindexing(m::Mat) = Base.LinearFast()
+Base.IndexStyle(m::Mat) = Base.LinearFast()
 
 similar{T}(m::Mat{T}) = Mat{T}(size(m)...)
 similar_empty(m::Mat) = similar(m)
@@ -261,7 +261,7 @@ function (::Type{UMat{T}}){T}(rows::Int, cols::Int, cn::Int;
     UMat{T,3}(handle)
 end
 
-(::Type{UMat}){T,N}(m::UMat{T,N}) = UMat{T,N}(m.handle)
+#(::Type{UMat}){T,N}(m::UMat{T,N}) = UMat{T,N}(m.handle)
 function (::Type{UMat}){T,N}(m::Mat{T,N}, flags=ACCESS_READ)
     UMat{T,N}(
         icxx"$(m.handle).getUMat($flags);")
@@ -314,7 +314,7 @@ end
 function convert{T,N}(::Type{Array}, m::Mat{T,N})
     p = convert(Ptr{T}, data(m))
     cn = channels(m)
-    arr = pointer_to_array(p, length(m))
+    arr = deepcopy(unsafe_wrap(Array, p, length(m), false));
     reshape(arr, reverse(size(m))...)
 end
 
@@ -342,10 +342,16 @@ end
 @inline handle(x::Number) = x
 
 # to avoid method ambiguity warnings
-for op in [:+, :-, :.*, :./, :*]
+for op in [:+, :-, :*]
     @eval begin
         $op(x::AbstractCvMat{Bool}, y::Bool) = error("not supported")
         $op(x::Bool, y::AbstractCvMat{Bool}) = error("not supported")
+    end
+end
+for op in [:*, :/]
+    @eval begin
+        Base.broadcast(::typeof($op), x::AbstractCvMat{Bool}, y::Bool) = error("not supported")
+        Base.broadcast(::typeof($op), x::Bool, y::AbstractCvMat{Bool}) = error("not supported")
     end
 end
 
@@ -362,14 +368,13 @@ end
     icxx"0 - $(x.handle);")
 -(x::AbstractCvMat) = -(MatExpr(x))
 
-.*(x::MatExpr, y::MatExpr) = MatExpr(
+Base.broadcast(::typeof(*), x::MatExpr, y::MatExpr) = MatExpr(
     icxx"$(x.handle).mul($(y.handle));")
-.*(x::MatExpr, y::Number) = @matexpr x * y
-.*(x::Number, y::MatExpr) = @matexpr x * y
-
-./(x::MatExpr, y::MatExpr) = @matexpr x / y
-./(x::MatExpr, y::Number) = @matexpr x / y
-./(x::Number, y::MatExpr) = @matexpr x / y
+Base.broadcast(::typeof(*), x::MatExpr, y::Number) = @matexpr x * y
+Base.broadcast(::typeof(*), x::Number, y::MatExpr) = @matexpr x * y
+Base.broadcast(::typeof(/), x::MatExpr, y::MatExpr) = @matexpr x / y
+Base.broadcast(::typeof(/), x::MatExpr, y::Number) = @matexpr x / y
+Base.broadcast(::typeof(/), x::Number, y::MatExpr) = @matexpr x / y
 
 *(x::MatExpr, y::MatExpr) = @matexpr x * y
 *(x::MatExpr, y::Number) = .*(x, y)
@@ -379,7 +384,7 @@ end
 /(x::Number, y::MatExpr) = ./(x, y)
 
 # For AbstractCvMats
-for op in [:+, :-, :.*, :./, :*]
+for op in [:+, :-, :*]
     @eval begin
         @inline $op(x::AbstractCvMat, y::AbstractCvMat) =
             $op(MatExpr(x), MatExpr(y))
@@ -387,12 +392,30 @@ for op in [:+, :-, :.*, :./, :*]
         @inline $op(x::AbstractCvMat, y::MatExpr) = $op(promote(x, y)...)
     end
 end
+for op in [:*, :/]
+    @eval begin
+        @inline Base.broadcast(::typeof($op), x::AbstractCvMat, y::AbstractCvMat) =
+            Base.broadcast($op, MatExpr(x), MatExpr(y))
+        @inline Base.broadcast(::typeof($op), x::MatExpr, y::AbstractCvMat) =
+            Base.broadcast($op, promote(x, y)...)
+        @inline Base.broadcast(::typeof($op), x::AbstractCvMat, y::MatExpr) =
+            Base.broadcast($op, promote(x, y)...)
+    end
+end
 
 # Mat and scalars
-for op in [:+, :-, :.*, :./, :*]
+for op in [:+, :-, :*]
     @eval begin
         @inline $op(x::AbstractCvMat, y::Number) = $op(MatExpr(x), y)
         @inline $op(x::Number, y::AbstractCvMat) = $op(x, MatExpr(y))
+    end
+end
+for op in [:*, :/]
+    @eval begin
+        @inline Base.broadcast(::typeof($op), x::AbstractCvMat, y::Number) =
+            Base.broadcast($op, MatExpr(x), y)
+        @inline Base.broadcast(::typeof($op), x::Number, y::AbstractCvMat) =
+            Base.broadcast($op, x, MatExpr(y))
     end
 end
 
